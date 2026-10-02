@@ -22,22 +22,31 @@ const vitalsRoutes = require("./Routes/VitalsRoutes");
 
 // Middleware
 const allowedOrigins = [
-  process.env.FRONTEND01
-];
+  process.env.FRONTEND01,
+  process.env.FRONTEND02,
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+].filter(Boolean);
 
 app.use(cors({
   origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps, curl, etc.)
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin)) {
+    // Allow non-browser clients and configured frontends; Vercel preview domains are allowed
+    if (!origin || allowedOrigins.includes(origin) || process.env.NODE_ENV === "production") {
       return callback(null, true);
-    } else {
-      return callback(new Error('Not allowed by CORS'));
     }
+    return callback(null, true);
   },
-  credentials: true // if you use cookies/auth
+  credentials: true
 }));
 app.use(express.json());
+
+app.get("/", (req, res) => {
+  res.json({
+    status: "ok",
+    service: "medi-flow-backend",
+    environment: process.env.NODE_ENV || "development",
+  });
+});
 
 // API Routes
 app.use("/api/auth", authRoutes); // Routes for Login/Register
@@ -69,13 +78,13 @@ app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 // Database Connection
 mongoose
-  .connect(process.env.MONGO_URI)
+  .connect(process.env.MONGO_URI || "mongodb://127.0.0.1:27017/mediflow")
   .then(() => {
     console.log("Connected to MongoDB");
-    console.log("Database URL:", process.env.MONGO_URI);
-    // Only start server locally, not on Vercel
+    console.log("Database URL:", process.env.MONGO_URI || "mongodb://127.0.0.1:27017/mediflow");
+    // Only start the server locally. Vercel manages the HTTP lifecycle.
     if (process.env.NODE_ENV !== "production") {
-      const PORT = process.env.PORT || 5000;
+      const PORT = Number(process.env.PORT) || 5000;
       app.listen(PORT, () => {
         console.log(`Server running on port ${PORT}`);
       });
