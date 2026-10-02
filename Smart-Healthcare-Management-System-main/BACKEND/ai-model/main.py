@@ -1,98 +1,162 @@
 # main.py
 # FastAPI backend for AI Health Chatbot
-
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+#
+# Designed for:
+# - Vercel Python / FastAPI deployment
+# - Vercel React/Vite frontend
+# - Local development
+# - Optional MongoDB
+# - Existing model.py subprocess
+#
+# IMPORTANT:
+# Keep model.py and requirements.txt in the same directory as this file.
 
 from pathlib import Path
-import os
-import sys
-import subprocess
+from typing import Optional
 import json
-import pymongo
+import os
 import re
+import subprocess
+import sys
+import threading
+import time
+
+import pymongo
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
 
 # ============================================================
-# FASTAPI APP
+# APP
 # ============================================================
 
 app = FastAPI(
     title="AI Health Chatbot API",
-    version="1.0.0"
+    version="1.1.0",
+    description="AI Health Chatbot API for the Smart Healthcare Management System.",
 )
 
 
 # ============================================================
-# CORS CONFIGURATION
+# CORS
+# ============================================================
+#
+# The browser sends an OPTIONS preflight request before some
+# POST requests. CORSMiddleware handles that automatically.
+#
+# allow_credentials=False is intentional because the chatbot
+# endpoint does not require browser cookies.
+#
+# FRONTEND_URL can be configured in Vercel, for example:
+# FRONTEND_URL=https://health-frontend-rho.vercel.app
+#
+# The Vercel regex also supports preview deployments such as:
+# https://health-frontend-xxxx.vercel.app
 # ============================================================
 
-# Production frontend + local development
-ALLOWED_ORIGINS = [
+frontend_url = os.getenv(
+    "FRONTEND_URL",
+    "https://health-frontend-rho.vercel.app",
+).strip().rstrip("/")
+
+ALLOWED_ORIGINS = {
+    frontend_url,
     "https://health-frontend-rho.vercel.app",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
-]
+}
+
+ALLOWED_ORIGINS.discard("")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=list(ALLOWED_ORIGINS),
+    allow_origin_regex=r"^https://[a-zA-Z0-9-]+\.vercel\.app$",
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Accept", "Content-Type", "Authorization"],
 )
 
 
 # ============================================================
-# PATH CONFIGURATION
+# PATHS
 # ============================================================
 
-# Always find model.py relative to this main.py file.
-# This is important when running on Vercel.
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "model.py"
 
 
 # ============================================================
-# MONGODB CONNECTION
+# MONGODB
+# ============================================================
+#
+# MongoDB is optional for the AI service. The chatbot must still
+# work if MongoDB is temporarily unavailable.
+#
+# Set:
+# MONGO_URI=mongodb+srv://...
+#
+# Optional:
+# MONGO_DB_NAME=healthcare
+# MONGO_VITALS_COLLECTION=vitals
 # ============================================================
 
-# IMPORTANT:
-# Add MONGO_URI in the Vercel environment variables.
-#
-# Example:
-# MONGO_URI=mongodb+srv://username:password@cluster.mongodb.net/
+MONGO_URI = os.getenv("MONGO_URI", "").strip()
+MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "healthcare").strip()
+MONGO_VITALS_COLLECTION = os.getenv(
+    "MONGO_VITALS_COLLECTION",
+    "vitals",
+).strip()
 
-MONGO_URI = os.getenv("MONGO_URI")
+_mongo_client: Optional[pymongo.MongoClient] = None
+_vitals_collection = None
+_mongo_lock = threading.Lock()
 
-client = None
-db = None
-vitals_collection = None
 
-if MONGO_URI:
-    try:
-        client = pymongo.MongoClient(
-            MONGO_URI,
-            serverSelectionTimeoutMS=5000
-        )
+def get_vitals_collection():
+    """
+    Lazily create/reuse the MongoDB connection.
 
-        # Test connection
-        client.admin.command("ping")
+    Lazy connection is safer for serverless/cold-start deployments
+    than forcing MongoDB connection during module import.
+    """
+    global _mongo_client, _vitals_collection
 
-        db = client.healthcare
-        vitals_collection = db.vitals
+    if not MONGO_URI:
+        return None
 
-        print("MongoDB connected successfully")
+    if _vitals_collection is not None:
+        return _vitals_collection
 
-    except Exception as e:
-        print("MongoDB connection error:", str(e))
-        client = None
-        db = None
-        vitals_collection = None
+    with _mongo_lock:
+        if _vitals_collection is not None:
+            return _vitals_collection
 
-else:
-    print("WARNING: MONGO_URI environment variable is not configured.")
+        try:
+            _mongo_client = pymongo.MongoClient(
+                MONGO_URI,
+                serverSelectionTimeoutMS=3000,
+                connectTimeoutMS=3000,
+                socketTimeoutMS=3000,
+                maxPoolSize=5,
+                minPoolSize=0,
+                retryWrites=True,
+            )
+
+            _mongo_client.admin.command("ping")
+
+            db = _mongo_client[MONGO_DB_NAME]
+            _vitals_collection = db[MONGO_VITALS_COLLECTION]
+
+            print("MongoDB connected successfully.")
+            return _vitals_collection
+
+        except Exception as exc:
+            print(f"MongoDB connection unavailable: {exc}")
+            _mongo_client = None
+            _vitals_collection = None
+            return None
 
 
 # ============================================================
@@ -100,15 +164,25 @@ else:
 # ============================================================
 
 class ChatRequest(BaseModel):
-    message: str
+    message: str = Field(
+        ...,
+        min_length=1,
+        max_length=2000,
+        description="User's health-related message.",
+    )
 
 
 class SymptomAnalysisRequest(BaseModel):
-    symptoms: list
+    symptoms: list[str] = Field(
+        ...,
+        min_length=1,
+        max_length=20,
+        description="List of symptoms.",
+    )
 
 
 # ============================================================
-# ROOT / HEALTH CHECK
+# HEALTH / ROOT ENDPOINTS
 # ============================================================
 
 @app.get("/")
@@ -116,21 +190,26 @@ async def root():
     return {
         "status": "ok",
         "service": "AI Health Chatbot API",
-        "version": "1.0.0"
+        "version": "1.1.0",
     }
 
 
 @app.get("/health")
 async def health():
+    collection = get_vitals_collection()
+
     return {
         "status": "ok",
         "service": "AI Health Chatbot API",
-        "mongodb": "connected" if vitals_collection is not None else "not configured"
+        "model_file": MODEL_PATH.exists(),
+        "mongodb": "connected" if collection is not None else (
+            "not configured" if not MONGO_URI else "unavailable"
+        ),
     }
 
 
 # ============================================================
-# HEALTH CONDITION KNOWLEDGE BASE
+# HEALTH KNOWLEDGE BASE
 # ============================================================
 
 condition_info = {
@@ -142,9 +221,8 @@ condition_info = {
             "dizziness",
             "jaw pain",
             "left arm pain",
-            "nausea"
+            "nausea",
         ],
-
         "risk_factors": [
             "high blood pressure",
             "high cholesterol",
@@ -152,27 +230,24 @@ condition_info = {
             "diabetes",
             "obesity",
             "family history",
-            "stress"
+            "stress",
         ],
-
         "prevention": [
             "regular exercise",
             "healthy diet",
             "quit smoking",
             "limit alcohol",
             "manage stress",
-            "regular check-ups"
+            "regular check-ups",
         ],
-
         "emergency_signs": [
-            "severe chest pain",
-            "pain spreading to arms/jaw",
+            "severe or persistent chest pain",
+            "pain spreading to the arm, shoulder, back, neck, or jaw",
             "sudden shortness of breath",
             "cold sweat",
-            "lightheadedness"
-        ]
+            "fainting or severe lightheadedness",
+        ],
     },
-
     "gastritis": {
         "symptoms": [
             "stomach pain",
@@ -181,508 +256,593 @@ condition_info = {
             "nausea",
             "vomiting",
             "loss of appetite",
-            "feeling full quickly"
+            "feeling full quickly",
         ],
-
         "risk_factors": [
-            "h. pylori infection",
-            "regular nsaid use",
+            "H. pylori infection",
+            "regular NSAID use",
             "excessive alcohol",
             "stress",
             "autoimmune disorders",
-            "bile reflux"
+            "bile reflux",
         ],
-
         "prevention": [
             "avoid irritating foods",
             "limit alcohol",
             "eat smaller meals",
             "manage stress",
-            "avoid nsaids",
-            "treatment for h. pylori"
+            "avoid unnecessary NSAID use",
+            "seek treatment for H. pylori when diagnosed",
         ],
-
         "diet_recommendations": [
-            "avoid spicy foods",
-            "limit acidic foods",
-            "avoid caffeine",
-            "eat high-fiber foods",
+            "avoid foods that trigger your symptoms",
+            "limit acidic or spicy foods if they worsen symptoms",
+            "limit caffeine if it worsens symptoms",
             "stay hydrated",
-            "eat regularly"
+            "eat regular, smaller meals",
         ],
-
         "treatment": [
-            "proton pump inhibitors",
-            "acid reducers",
-            "antacids",
-            "antibiotics (for H. pylori)",
-            "eliminate trigger foods",
-            "stress reduction techniques",
-            "smaller meals",
-            "avoid alcohol"
-        ]
-    }
+            "acid-reducing medicines may be used when appropriate",
+            "antacids may provide symptom relief",
+            "H. pylori requires clinician-directed treatment",
+            "avoid identified trigger foods",
+            "avoid unnecessary NSAID use",
+            "seek medical evaluation for persistent symptoms",
+        ],
+    },
 }
 
 
 # ============================================================
-# SUGGESTED RESPONSE HANDLER
+# TEXT HELPERS
 # ============================================================
 
-def get_suggested_response(message):
-    """
-    Provide predefined responses for common suggested queries.
-    """
+def normalize_text(value: str) -> str:
+    """Normalize whitespace and case for matching."""
+    value = value or ""
+    value = re.sub(r"\s+", " ", value)
+    return value.strip().lower()
 
-    message = message.lower().strip()
+
+def get_suggested_response(message: str):
+    """Return predefined responses for common chatbot suggestions."""
+    message = normalize_text(message)
 
     suggested_responses = {
-
-        "i have chest pain":
-            "Chest pain can be caused by heart issues (like angina or heart attack), "
-            "lung problems, digestive issues, or muscle strain. Seek emergency medical "
-            "attention for severe chest pain, especially with shortness of breath or "
-            "pain radiating to arm/jaw. Does the pain come and go or is it constant?",
-
-        "feeling dizzy":
-            "Dizziness may be caused by inner ear problems, dehydration, blood pressure "
-            "issues, or anxiety. For persistent dizziness or if accompanied by severe "
-            "headache or vision changes, please seek medical attention. Are you "
-            "experiencing any other symptoms with your dizziness?",
-
-        "stomach hurts":
-            "Stomach pain could be indigestion, gastritis, food poisoning, or something "
-            "more serious like ulcers or appendicitis. The location and timing of your "
-            "pain can help determine the cause. Can you describe where exactly the pain "
-            "is located?",
-
-        "shortness of breath":
-            "Shortness of breath may result from respiratory issues, heart problems, "
-            "anxiety, or overexertion. Sudden severe breathing difficulty, especially "
-            "with chest pain, could be an emergency requiring immediate medical "
-            "attention. Is this a new symptom for you?",
-
-        "how to treat gastritis?":
-            "Gastritis treatment includes medications like antacids or acid reducers, "
-            "avoiding trigger foods (spicy, acidic), eating smaller meals, and avoiding "
-            "alcohol and NSAIDs. For persistent symptoms, please consult with your "
-            "healthcare provider for proper diagnosis and treatment plan."
+        "i have chest pain": (
+            "Chest pain can have many causes, including heart, lung, "
+            "digestive, or muscle-related problems. Severe, new, or "
+            "persistent chest pain, especially with shortness of breath, "
+            "sweating, fainting, or pain spreading to the arm or jaw, "
+            "needs urgent medical evaluation."
+        ),
+        "feeling dizzy": (
+            "Dizziness can have several causes, including dehydration, "
+            "inner-ear problems, blood-pressure changes, medication "
+            "effects, or other conditions. Seek urgent medical care if "
+            "dizziness is severe or occurs with fainting, chest pain, "
+            "severe headache, weakness, or difficulty speaking."
+        ),
+        "stomach hurts": (
+            "Stomach pain can result from indigestion, gastritis, infection, "
+            "ulcers, or other conditions. The location, severity, duration, "
+            "and associated symptoms are important. Severe or worsening pain, "
+            "persistent vomiting, blood in vomit or stool, fainting, or a "
+            "rigid abdomen requires prompt medical evaluation."
+        ),
+        "shortness of breath": (
+            "Shortness of breath can have respiratory, heart-related, "
+            "anxiety-related, or other causes. Sudden or severe breathing "
+            "difficulty, especially with chest pain, blue lips, fainting, "
+            "or confusion, requires emergency medical attention."
+        ),
+        "how to treat gastritis?": (
+            "Gastritis treatment depends on its cause. A clinician may "
+            "recommend acid-reducing treatment or other medicines when "
+            "appropriate. Avoiding personal triggers and unnecessary NSAID "
+            "use may help. Persistent or severe symptoms should be evaluated "
+            "by a healthcare professional."
+        ),
     }
 
     return suggested_responses.get(message)
 
 
-# ============================================================
-# CONDITION ANSWER HANDLER
-# ============================================================
-
-def get_condition_answer(message):
+def get_condition_answer(message: str):
     """
-    Extract health condition questions and provide answers
-    based on the local knowledge base.
+    Answer basic condition-information questions from the local
+    knowledge base. This is informational and is not a diagnosis.
     """
-
-    message = message.lower()
+    message = normalize_text(message)
 
     heart_attack_patterns = [
-        r"heart attack",
-        r"cardiac arrest",
-        r"heart pain",
-        r"heart condition"
+        r"\bheart attack\b",
+        r"\bcardiac arrest\b",
+        r"\bheart pain\b",
+        r"\bheart condition\b",
     ]
 
     gastritis_patterns = [
-        r"gastritis",
-        r"stomach inflammation",
-        r"stomach pain",
-        r"acid reflux",
-        r"indigestion"
+        r"\bgastritis\b",
+        r"\bstomach inflammation\b",
+        r"\bstomach pain\b",
+        r"\bacid reflux\b",
+        r"\bindigestion\b",
     ]
 
     condition = None
 
-    if any(
-        re.search(pattern, message)
-        for pattern in heart_attack_patterns
-    ):
+    if any(re.search(pattern, message) for pattern in heart_attack_patterns):
         condition = "heart_attack"
-
-    elif any(
-        re.search(pattern, message)
-        for pattern in gastritis_patterns
-    ):
+    elif any(re.search(pattern, message) for pattern in gastritis_patterns):
         condition = "gastritis"
 
     if not condition:
         return None
 
-    # --------------------------------------------------------
-    # Symptoms
-    # --------------------------------------------------------
+    info = condition_info[condition]
+    readable_name = condition.replace("_", " ")
 
-    if re.search(
-        r"symptom|sign|feel|experiencing",
-        message
-    ):
+    if re.search(r"\bsymptom|sign|feel|experiencing\b", message):
         return (
-            f"Common symptoms of {condition.replace('_', ' ')} include: "
-            + ", ".join(condition_info[condition]["symptoms"])
+            f"Common symptoms associated with {readable_name} include: "
+            + ", ".join(info["symptoms"])
+            + ". This information cannot confirm a diagnosis."
         )
 
-    # --------------------------------------------------------
-    # Causes / Risk factors
-    # --------------------------------------------------------
-
-    elif re.search(
-        r"cause|risk factor|reason",
-        message
-    ):
+    if re.search(r"\bcause|risk factor|reason\b", message):
         return (
-            f"Risk factors for {condition.replace('_', ' ')} include: "
-            + ", ".join(condition_info[condition]["risk_factors"])
+            f"Risk factors associated with {readable_name} include: "
+            + ", ".join(info["risk_factors"])
+            + "."
         )
 
-    # --------------------------------------------------------
-    # Prevention
-    # --------------------------------------------------------
-
-    elif re.search(
-        r"prevent|avoid|stop",
-        message
-    ):
+    if re.search(r"\bprevent|avoid|stop\b", message):
         return (
-            f"Prevention measures for {condition.replace('_', ' ')} include: "
-            + ", ".join(condition_info[condition]["prevention"])
+            f"General prevention measures associated with {readable_name} include: "
+            + ", ".join(info["prevention"])
+            + "."
         )
 
-    # --------------------------------------------------------
-    # Gastritis treatment
-    # --------------------------------------------------------
-
-    elif (
-        re.search(
-            r"treat|cure|heal|therapy|medication",
-            message
-        )
-        and condition == "gastritis"
-    ):
-        return (
-            "Treatment options for gastritis include: "
-            + ", ".join(condition_info[condition]["treatment"])
-        )
-
-    # --------------------------------------------------------
-    # Heart attack emergency signs
-    # --------------------------------------------------------
-
-    elif (
-        condition == "heart_attack"
-        and re.search(
-            r"emergency|urgent|serious",
-            message
-        )
-    ):
-        return (
-            "Emergency signs of a heart attack include: "
-            + ", ".join(condition_info[condition]["emergency_signs"])
-        )
-
-    # --------------------------------------------------------
-    # Gastritis diet
-    # --------------------------------------------------------
-
-    elif (
+    if (
         condition == "gastritis"
-        and re.search(
-            r"diet|eat|food",
-            message
-        )
+        and re.search(r"\btreat|cure|heal|therapy|medication\b", message)
     ):
         return (
-            "Dietary recommendations for gastritis: "
-            + ", ".join(condition_info[condition]["diet_recommendations"])
+            "Gastritis treatment depends on the underlying cause. General "
+            "options may include: "
+            + ", ".join(info["treatment"])
+            + ". A clinician should determine the appropriate treatment."
         )
 
-    # --------------------------------------------------------
-    # General heart attack information
-    # --------------------------------------------------------
+    if (
+        condition == "heart_attack"
+        and re.search(r"\bemergency|urgent|serious\b", message)
+    ):
+        return (
+            "Possible heart-attack emergency signs include: "
+            + ", ".join(info["emergency_signs"])
+            + ". If these symptoms are happening now, seek emergency medical care."
+        )
 
-    elif condition == "heart_attack":
+    if (
+        condition == "gastritis"
+        and re.search(r"\bdiet|eat|food\b", message)
+    ):
+        return (
+            "General dietary considerations for gastritis include: "
+            + ", ".join(info["diet_recommendations"])
+            + ". Individual triggers vary."
+        )
+
+    if condition == "heart_attack":
         return (
             "A heart attack occurs when blood flow to part of the heart "
-            "is blocked, causing damage to heart muscle. It's a medical "
-            "emergency requiring immediate attention. Common symptoms "
-            "include chest pain, shortness of breath, and pain radiating "
-            "to the arm or jaw."
+            "is blocked. It is a medical emergency. Possible symptoms "
+            "include chest pressure or pain, shortness of breath, sweating, "
+            "nausea, or pain that spreads to the arm, shoulder, back, neck, "
+            "or jaw. If these symptoms are happening now, seek emergency care."
         )
 
-    # --------------------------------------------------------
-    # General gastritis information
-    # --------------------------------------------------------
+    return (
+        "Gastritis is inflammation of the stomach lining. Possible symptoms "
+        "include stomach discomfort, nausea, bloating, or reduced appetite. "
+        "Persistent, severe, or concerning symptoms should be evaluated by "
+        "a healthcare professional."
+    )
 
-    elif condition == "gastritis":
+
+# ============================================================
+# SYMPTOM EXTRACTION
+# ============================================================
+
+SYMPTOM_ALIASES = {
+    "chest pain": [
+        "chest pain",
+        "chest hurts",
+        "pain in my chest",
+        "chest discomfort",
+    ],
+    "shortness of breath": [
+        "shortness of breath",
+        "breathlessness",
+        "difficulty breathing",
+        "trouble breathing",
+        "can't breathe",
+        "cannot breathe",
+    ],
+    "sweating": [
+        "sweating",
+        "cold sweat",
+        "sweaty",
+    ],
+    "dizziness": [
+        "dizziness",
+        "dizzy",
+        "feeling dizzy",
+    ],
+    "jaw pain": [
+        "jaw pain",
+        "pain in my jaw",
+    ],
+    "left arm pain": [
+        "left arm pain",
+        "pain in my left arm",
+    ],
+    "nausea": [
+        "nausea",
+        "feeling nauseous",
+    ],
+    "vomiting": [
+        "vomiting",
+        "vomit",
+    ],
+    "stomach pain": [
+        "stomach pain",
+        "stomach hurts",
+        "stomach ache",
+        "abdominal pain",
+        "belly pain",
+    ],
+    "bloating": [
+        "bloating",
+        "bloated",
+    ],
+    "heartburn": [
+        "heartburn",
+        "burning in chest after eating",
+    ],
+    "loss of appetite": [
+        "loss of appetite",
+        "no appetite",
+    ],
+    "regurgitation": [
+        "regurgitation",
+        "food coming back up",
+    ],
+    "difficulty swallowing": [
+        "difficulty swallowing",
+        "trouble swallowing",
+        "painful swallowing",
+    ],
+    "racing heart": [
+        "racing heart",
+        "heart racing",
+        "fast heartbeat",
+        "palpitations",
+    ],
+    "coughing": [
+        "coughing",
+        "cough",
+    ],
+    "coughing blood": [
+        "coughing blood",
+        "blood when coughing",
+        "coughing up blood",
+    ],
+}
+
+
+def extract_symptoms(message: str) -> list[str]:
+    """Extract normalized symptoms from free-form chatbot text."""
+    text = normalize_text(message)
+    found = []
+
+    for symptom, aliases in SYMPTOM_ALIASES.items():
+        if any(alias in text for alias in aliases):
+            found.append(symptom)
+
+    return found
+
+
+# ============================================================
+# EMERGENCY DETECTION
+# ============================================================
+
+EMERGENCY_PATTERNS = [
+    r"\bsevere chest pain\b",
+    r"\bcrushing chest pain\b",
+    r"\bpressure in (my|the) chest\b",
+    r"\bcan't breathe\b",
+    r"\bcannot breathe\b",
+    r"\bsevere shortness of breath\b",
+    r"\bcoughing up blood\b",
+    r"\bcoughing blood\b",
+    r"\bfainted\b",
+    r"\bpassed out\b",
+    r"\bunconscious\b",
+    r"\bblue lips\b",
+    r"\bsevere bleeding\b",
+]
+
+
+def emergency_response(message: str) -> Optional[str]:
+    """Return an urgent-care message for obvious emergency phrases."""
+    text = normalize_text(message)
+
+    if any(re.search(pattern, text) for pattern in EMERGENCY_PATTERNS):
         return (
-            "Gastritis is inflammation of the stomach lining, often caused "
-            "by infection, excessive alcohol, or regular use of certain "
-            "pain relievers. Symptoms include stomach pain, nausea, and "
-            "reduced appetite. Most cases can be managed with lifestyle "
-            "changes and medication."
+            "Some symptoms you described can represent a medical emergency. "
+            "This chatbot cannot diagnose or rule out an emergency. "
+            "If these symptoms are happening now or are severe/worsening, "
+            "contact your local emergency service or go to the nearest "
+            "emergency department immediately."
         )
 
     return None
 
 
 # ============================================================
-# RUN MODEL.PY
+# MODEL EXECUTION
 # ============================================================
 
-def run_model(symptoms):
-    """
-    Execute model.py using an absolute path.
+MODEL_TIMEOUT_SECONDS = float(
+    os.getenv("MODEL_TIMEOUT_SECONDS", "8")
+)
 
-    This avoids problems caused by Vercel's working directory.
-    """
 
-    if not MODEL_PATH.exists():
+def _clean_model_output(output: str) -> str:
+    """
+    Clean model stdout without assuming a specific model.py format.
+
+    If model.py returns JSON containing prediction/response/result,
+    use that field. Otherwise return stdout as text.
+    """
+    output = (output or "").strip()
+
+    if not output:
+        return ""
+
+    # Try complete JSON first.
+    try:
+        data = json.loads(output)
+
+        if isinstance(data, dict):
+            for key in ("prediction", "response", "result", "message"):
+                if key in data and data[key] is not None:
+                    return str(data[key]).strip()
+
+            return json.dumps(data, ensure_ascii=False)
+
+        if isinstance(data, str):
+            return data.strip()
+
+    except json.JSONDecodeError:
+        pass
+
+    return output
+
+
+def run_model(symptoms: list[str]) -> str:
+    """
+    Execute model.py using the same Python environment.
+
+    model.py is expected to accept one JSON argument, for example:
+        python model.py '["chest pain", "dizziness"]'
+
+    A timeout prevents a stuck model from hanging the serverless request.
+    """
+    if not MODEL_PATH.is_file():
         raise FileNotFoundError(
-            f"model.py not found at: {MODEL_PATH}"
+            f"model.py was not found at: {MODEL_PATH}"
         )
+
+    payload = json.dumps(symptoms, ensure_ascii=False)
+
+    command = [
+        sys.executable,
+        str(MODEL_PATH),
+        payload,
+    ]
+
+    print(f"Running model: {MODEL_PATH.name}")
 
     try:
-
-        process = subprocess.Popen(
-            [
-                sys.executable,
-                str(MODEL_PATH),
-                json.dumps(symptoms)
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=str(BASE_DIR)
+        completed = subprocess.run(
+            command,
+            cwd=str(BASE_DIR),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=MODEL_TIMEOUT_SECONDS,
+            check=False,
         )
 
-        output, error = process.communicate()
+    except subprocess.TimeoutExpired as exc:
+        print(f"Model timed out after {MODEL_TIMEOUT_SECONDS} seconds.")
+        raise RuntimeError(
+            "The AI prediction service timed out."
+        ) from exc
 
-        prediction = output.decode(
-            "utf-8",
-            errors="replace"
-        ).strip()
+    except Exception as exc:
+        print(f"Could not start model.py: {exc}")
+        raise RuntimeError(
+            "The AI prediction engine could not be started."
+        ) from exc
 
-        error_output = error.decode(
-            "utf-8",
-            errors="replace"
-        ).strip()
+    stdout = (completed.stdout or "").strip()
+    stderr = (completed.stderr or "").strip()
 
-        if process.returncode != 0:
+    if stderr:
+        # Keep server logs useful without exposing them to the browser.
+        print(f"model.py stderr: {stderr[-4000:]}")
 
-            print(
-                "Model process failed:",
-                error_output
-            )
-
-            raise RuntimeError(
-                error_output or
-                f"model.py exited with code {process.returncode}"
-            )
-
-        if not prediction:
-            raise RuntimeError(
-                "model.py returned an empty prediction"
-            )
-
-        print(
-            "Prediction:",
-            prediction
+    if completed.returncode != 0:
+        print(f"model.py exit code: {completed.returncode}")
+        raise RuntimeError(
+            f"model.py exited with code {completed.returncode}"
         )
 
-        return prediction
+    prediction = _clean_model_output(stdout)
 
-    except Exception as e:
+    if not prediction:
+        raise RuntimeError("model.py returned an empty prediction.")
 
-        print(
-            "Model execution error:",
-            str(e)
-        )
-
-        raise
+    print(f"Model prediction generated successfully.")
+    return prediction
 
 
 # ============================================================
-# CHAT ANALYSIS ENDPOINT
+# VITALS
+# ============================================================
+
+def get_latest_vitals() -> dict:
+    """
+    Read the latest vitals if MongoDB is available.
+    Returns safe defaults when MongoDB is unavailable.
+    """
+    defaults = {
+        "bp": 120,
+        "pulse": 75,
+        "sugar": 100,
+    }
+
+    collection = get_vitals_collection()
+
+    if collection is None:
+        return defaults
+
+    try:
+        vitals = collection.find_one(
+            {},
+            sort=[("_id", -1)],
+        ) or {}
+
+        return {
+            "bp": vitals.get("bp", defaults["bp"]),
+            "pulse": vitals.get("pulse", defaults["pulse"]),
+            "sugar": vitals.get("sugar", defaults["sugar"]),
+        }
+
+    except Exception as exc:
+        print(f"Could not fetch latest vitals: {exc}")
+        return defaults
+
+
+def number_value(value, default: float) -> float:
+    """Convert a numeric-looking value safely."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+# ============================================================
+# CHAT ENDPOINT
 # ============================================================
 
 @app.post("/api/chat/analyze")
 async def analyze_chat(request: ChatRequest):
-
     message = request.message.strip()
 
-    if not message:
+    # 1. Emergency check first.
+    urgent = emergency_response(message)
 
+    if urgent:
         return {
-            "response": "Please enter a message."
+            "response": urgent,
+            "urgent": True,
         }
 
-    # --------------------------------------------------------
-    # Suggested responses
-    # --------------------------------------------------------
-
-    suggested_response = get_suggested_response(
-        message
-    )
+    # 2. Common predefined responses.
+    suggested_response = get_suggested_response(message)
 
     if suggested_response:
-
         return {
-            "response": suggested_response
+            "response": suggested_response,
+            "urgent": False,
         }
 
-    # --------------------------------------------------------
-    # Specific condition questions
-    # --------------------------------------------------------
-
-    condition_answer = get_condition_answer(
-        message.lower()
-    )
+    # 3. Condition information.
+    condition_answer = get_condition_answer(message)
 
     if condition_answer:
-
         return {
-            "response": condition_answer
+            "response": condition_answer,
+            "urgent": False,
         }
 
-    # --------------------------------------------------------
-    # Extract known symptoms
-    # --------------------------------------------------------
-
-    message_lower = message.lower()
-
-    known_symptoms = [
-        "chest pain",
-        "shortness of breath",
-        "sweating",
-        "dizziness",
-        "jaw pain",
-        "left arm pain",
-        "nausea",
-        "vomiting",
-        "stomach pain",
-        "bloating",
-        "heartburn",
-        "loss of appetite",
-        "regurgitation",
-        "difficulty swallowing",
-        "racing heart",
-        "coughing",
-        "coughing blood"
-    ]
-
-    symptoms = [
-        symptom
-        for symptom in known_symptoms
-        if symptom in message_lower
-    ]
-
-    # --------------------------------------------------------
-    # No known symptoms
-    # --------------------------------------------------------
+    # 4. Extract symptoms.
+    symptoms = extract_symptoms(message)
 
     if not symptoms:
-
         return {
-            "response":
-                "Please describe your symptoms in more detail, "
-                "or ask a specific question about heart attack "
-                "or gastritis."
+            "response": (
+                "Please describe your symptoms in more detail. "
+                "For example: chest pain, dizziness, stomach pain, "
+                "shortness of breath, nausea, or vomiting."
+            ),
+            "urgent": False,
         }
 
-    # --------------------------------------------------------
-    # Fetch latest vitals
-    # --------------------------------------------------------
+    # 5. Optional vitals.
+    vitals = get_latest_vitals()
 
-    bp = 120
-    pulse = 75
-    sugar = 100
+    bp = number_value(vitals.get("bp"), 120)
+    pulse = number_value(vitals.get("pulse"), 75)
+    sugar = number_value(vitals.get("sugar"), 100)
 
-    if vitals_collection is not None:
-
-        try:
-
-            vitals = (
-                vitals_collection
-                .find_one(
-                    sort=[("_id", -1)]
-                )
-                or {}
-            )
-
-            bp = vitals.get(
-                "bp",
-                120
-            )
-
-            pulse = vitals.get(
-                "pulse",
-                75
-            )
-
-            sugar = vitals.get(
-                "sugar",
-                100
-            )
-
-        except Exception as e:
-
-            print(
-                "Could not fetch vitals:",
-                str(e)
-            )
-
-    # --------------------------------------------------------
-    # Run AI/model prediction
-    # --------------------------------------------------------
-
+    # 6. AI/model prediction.
     try:
+        prediction = run_model(symptoms)
 
-        prediction = run_model(
-            symptoms
+    except Exception as exc:
+        print(f"Chat model error: {exc}")
+
+        return {
+            "response": (
+                "I could not run the AI prediction engine right now. "
+                "Please try again in a moment."
+            ),
+            "urgent": False,
+            "prediction_available": False,
+        }
+
+    # 7. Add a cautious vitals note.
+    vitals_note = ""
+
+    if bp > 140 or pulse > 100:
+        vitals_note = (
+            " Your latest stored vitals also show an elevated value. "
+            "Please discuss abnormal readings with a healthcare professional."
         )
 
-    except Exception as e:
-
-        return {
-            "response":
-                "The prediction engine could not be executed "
-                "at the moment.",
-            "error": str(e)
-        }
-
-    # --------------------------------------------------------
-    # Modify severity based on vitals
-    # --------------------------------------------------------
-
-    if "low" in prediction.lower():
-
-        try:
-
-            if bp > 140 or pulse > 100:
-
-                prediction += (
-                    "\nNote: Your vitals indicate elevated "
-                    "risk. Consider medical advice."
-                )
-
-        except Exception:
-
-            pass
-
-    # --------------------------------------------------------
-    # Final response
-    # --------------------------------------------------------
-
     return {
-        "response":
-            f"Based on symptoms ({', '.join(symptoms)}), "
-            f"the system suggests: {prediction}"
+        "response": (
+            f"Based on the symptoms you entered "
+            f"({', '.join(symptoms)}), the system suggests: {prediction}"
+            f"{vitals_note}"
+        ),
+        "prediction": prediction,
+        "symptoms": symptoms,
+        "vitals": {
+            "bp": bp,
+            "pulse": pulse,
+            "sugar": sugar,
+        },
+        "urgent": False,
+        "prediction_available": True,
     }
 
 
@@ -691,65 +851,63 @@ async def analyze_chat(request: ChatRequest):
 # ============================================================
 
 @app.post("/api/novelty/analyze")
-async def analyze_symptoms(
-    request: SymptomAnalysisRequest
-):
-
-    # --------------------------------------------------------
-    # Validate symptoms
-    # --------------------------------------------------------
-
-    if not request.symptoms:
-
-        return {
-            "prediction":
-                "Please provide at least one symptom."
-        }
-
+async def analyze_symptoms(request: SymptomAnalysisRequest):
     symptoms = [
-        str(symptom).lower().strip()
+        normalize_text(symptom)
         for symptom in request.symptoms
         if str(symptom).strip()
     ]
 
-    if not symptoms:
+    # Remove duplicates while preserving order.
+    symptoms = list(dict.fromkeys(symptoms))
 
+    if not symptoms:
         return {
-            "prediction":
-                "Please provide at least one valid symptom."
+            "prediction": "Please provide at least one valid symptom.",
+            "prediction_available": False,
         }
 
-    # --------------------------------------------------------
-    # Run model
-    # --------------------------------------------------------
+    # Emergency keywords in structured input.
+    combined = " ".join(symptoms)
+    urgent = emergency_response(combined)
+
+    if urgent:
+        return {
+            "prediction": urgent,
+            "urgent": True,
+            "prediction_available": False,
+        }
 
     try:
+        prediction = run_model(symptoms)
 
-        prediction = run_model(
-            symptoms
-        )
-
-    except Exception as e:
+    except Exception as exc:
+        print(f"Structured model error: {exc}")
 
         return {
-            "prediction":
-                "Error analyzing symptoms.",
-            "error": str(e)
+            "prediction": (
+                "The AI prediction engine could not be executed right now."
+            ),
+            "prediction_available": False,
         }
 
     return {
-        "prediction": prediction
+        "prediction": prediction,
+        "symptoms": symptoms,
+        "urgent": False,
+        "prediction_available": True,
     }
 
 
 # ============================================================
 # LOCAL DEVELOPMENT
 # ============================================================
-
-# Vercel handles the server in production.
 #
-# For local development:
+# Run from this directory:
 #
-# uvicorn main:app --reload --port 8000
+#   uvicorn main:app --reload --port 8000
 #
-# Do not use app.run() here.
+# Vercel imports `app` automatically.
+#
+# Do NOT add app.run() for FastAPI.
+# ============================================================
