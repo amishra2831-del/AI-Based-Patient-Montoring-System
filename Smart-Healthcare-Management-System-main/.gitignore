@@ -50,9 +50,12 @@ __pycache__/
 *$py.class
 *.so
 .Python
-env/
+.env/
+.venv/
 venv/
 ENV/
+**/.venv/
+**/venv/
 develop-eggs/
 downloads/
 eggs/
