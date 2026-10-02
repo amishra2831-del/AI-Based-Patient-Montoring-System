@@ -32,11 +32,15 @@ const app = express();
 // CORS CONFIGURATION
 // ============================================================
 
-// Frontend URLs from Vercel environment variables
+// Frontend URLs from environment variables.
+// Accepts comma-separated lists, so one variable can hold many origins:
+//   FRONTEND_URL=https://app.example.com,https://www.example.com
+//   CORS_ALLOWED_ORIGINS=https://staging.example.com
 const configuredOrigins = [
   process.env.FRONTEND_URL,
   process.env.FRONTEND01,
   process.env.FRONTEND02,
+  process.env.CORS_ALLOWED_ORIGINS,
 ]
   .filter(Boolean)
   .flatMap((value) => value.split(","))
@@ -298,12 +302,11 @@ app.use(
 // ============================================================
 
 const path = require("path");
+const { UPLOAD_DIR } = require("./Middleware/upload");
 
 app.use(
   "/uploads",
-  express.static(
-    path.join(__dirname, "uploads")
-  )
+  express.static(UPLOAD_DIR)
 );
 
 // ============================================================
@@ -355,34 +358,61 @@ const mongoURI =
   process.env.MONGO_URI ||
   "mongodb://127.0.0.1:27017/mediflow";
 
-mongoose
-  .connect(mongoURI)
-  .then(() => {
-    console.log("========================================");
-    console.log("Connected to MongoDB");
-    console.log("========================================");
+// Serverless platforms (Vercel, Netlify, AWS Lambda) import this file and
+// expect an exported request handler. They must never call app.listen().
+const isServerless = Boolean(
+  process.env.VERCEL ||
+    process.env.AWS_LAMBDA_FUNCTION_NAME ||
+    process.env.NETLIFY
+);
 
-    // --------------------------------------------------------
-    // LOCAL DEVELOPMENT
-    // --------------------------------------------------------
+function startServer() {
+  const PORT = Number(process.env.PORT) || 5000;
 
-    if (process.env.NODE_ENV !== "production") {
-      const PORT =
-        Number(process.env.PORT) || 5000;
-
-      app.listen(PORT, () => {
-        console.log(
-          `Server running on port ${PORT}`
-        );
-      });
-    }
-  })
-  .catch((err) => {
-    console.error(
-      "Database connection error:",
-      err.message
+  app.listen(PORT, () => {
+    console.log(
+      `Server running on port ${PORT}`
     );
   });
+}
+
+if (!isServerless) {
+  mongoose
+    .connect(mongoURI, {
+      serverSelectionTimeoutMS: 10000,
+    })
+    .then(() => {
+      console.log("========================================");
+      console.log("Connected to MongoDB");
+      console.log("========================================");
+
+      startServer();
+    })
+    .catch((err) => {
+      console.error(
+        "Database connection error:",
+        err.message
+      );
+
+      // Start anyway so the API stays reachable and /health can be used
+      // to diagnose the database instead of a hard crash loop.
+      startServer();
+    });
+} else {
+  mongoose
+    .connect(mongoURI, {
+      serverSelectionTimeoutMS: 10000,
+    })
+    .then(() => {
+      console.log("Connected to MongoDB");
+    })
+    .catch((err) => {
+      console.error(
+        "Database connection error:",
+        err.message
+      );
+    });
+}
 
 // ============================================================
 // EXPORT APP

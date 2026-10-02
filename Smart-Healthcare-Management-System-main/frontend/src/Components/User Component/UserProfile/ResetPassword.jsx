@@ -36,7 +36,7 @@ function ResetPassword() {
         confirmPassword,
       });
       alert("Password reset successful");
-      navigate("/Login");
+      navigate("/login");
     } catch (error) {
       setError("Error resetting password. Please try again.");
     } finally {

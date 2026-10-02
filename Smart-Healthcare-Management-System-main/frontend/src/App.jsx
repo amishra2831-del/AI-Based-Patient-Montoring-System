@@ -17,6 +17,7 @@ import Login from "./Components/User Component/Login";
 import Registration from "./Components/User Component/Registration";
 import UDashboard from "./Components/User Component/UserAdmin/UDashboard";
 import ForgotPassword from "./Components/User Component/UserProfile/ForgotPassword";
+import ResetPassword from "./Components/User Component/UserProfile/ResetPassword";
 import AddNewUser from "./Components/User Component/UserAdmin/AddNewUser";
 
 //Pharmacy Components
@@ -86,6 +87,7 @@ function App() {
           <Route path="/login" element={<Login />} />
           <Route path="/registration" element={<Registration />} />
           <Route path="/forgot-password" element={<ForgotPassword />} />
+          <Route path="/reset-password/:token" element={<ResetPassword />} />
           <Route path="/User-Dashboard" element={<UDashboard />} />
           <Route path="/User-Account" element={<MyAccount />} />
           <Route path="/Add-New-Patient" element={<AddNewUser />} />
@@ -126,7 +128,7 @@ function App() {
             path="/Appoinment-Management"
             element={<AppoinmentManagement />}
           />
-          <Route path="Rijected-Appoinment" element={<RejectedAppoinment />} />
+          <Route path="/Rijected-Appoinment" element={<RejectedAppoinment />} />
         </Routes>
         {/*  Conditionally show Chatbot */}
         {showChatbot && (

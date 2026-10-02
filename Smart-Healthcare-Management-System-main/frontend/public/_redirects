@@ -1,6 +1,11 @@
 /*
-  Netlify _redirects file to proxy API requests to backend server
-  Adjust the backend URL/port as needed
+  Netlify _redirects
+
+  Single Page Application fallback: React Router owns the client-side
+  routes, so any unknown path must serve index.html.
+
+  API calls are NOT proxied here. The frontend calls the backend using the
+  absolute VITE_API_URL / VITE_CHAT_API_URL values, so /api/* never needs to
+  be rewritten to the backend host.
 */
-api/*  http://localhost:5000/:splat  200
 /*    /index.html   200

@@ -1,12 +1,24 @@
-
 [build]
   base = "frontend"
   publish = "dist"
   command = "npm run build"
 
 [dev]
-  command = "npm run dev"
+  command = "npm run start"
   publish = "frontend/dist"
+  targetPort = 5173
+  port = 5173
 
 [functions]
   directory = "netlify/functions"
+
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/proxy/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

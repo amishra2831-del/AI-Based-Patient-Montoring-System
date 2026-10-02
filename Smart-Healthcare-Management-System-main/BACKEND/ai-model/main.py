@@ -48,31 +48,48 @@ app = FastAPI(
 # allow_credentials=False is intentional because the chatbot
 # endpoint does not require browser cookies.
 #
-# FRONTEND_URL can be configured in Vercel, for example:
-# FRONTEND_URL=https://health-frontend-rho.vercel.app
+# Allowed origins are configured through the environment. Set one or
+# more of the following (comma-separated values are supported):
 #
-# The Vercel regex also supports preview deployments such as:
-# https://health-frontend-xxxx.vercel.app
+#   FRONTEND_URL=https://<your-frontend-domain>
+#   FRONTEND01=https://<your-frontend-domain>
+#   FRONTEND02=https://<your-frontend-domain>
+#
+# Vercel preview deployments such as
+# https://<project>-<hash>.vercel.app are also accepted, see
+# allow_origin_regex below.
 # ============================================================
 
-frontend_url = os.getenv(
-    "FRONTEND_URL",
-    "https://health-frontend-rho.vercel.app",
-).strip().rstrip("/")
+_frontend_url = os.getenv("FRONTEND_URL", "").strip()
 
 ALLOWED_ORIGINS = {
-    frontend_url,
-    "https://health-frontend-rho.vercel.app",
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
+    origin.strip().rstrip("/")
+    for origin in ",".join(
+        [
+            _frontend_url,
+            os.getenv("FRONTEND01", "").strip(),
+            os.getenv("FRONTEND02", "").strip(),
+            os.getenv("CORS_ALLOWED_ORIGINS", "").strip(),
+        ]
+    ).split(",")
+    if origin.strip()
 }
 
-ALLOWED_ORIGINS.discard("")
+# Local development origins, harmless in production because browsers only
+# send them from a machine running the frontend on localhost.
+ALLOWED_ORIGINS.update(
+    {
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    }
+)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=list(ALLOWED_ORIGINS),
-    allow_origin_regex=r"^https://[a-zA-Z0-9-]+\.vercel\.app$",
+    allow_origins=sorted(ALLOWED_ORIGINS),
+    allow_origin_regex=r"^https://[a-zA-Z0-9.-]+\.vercel\.app$",
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Accept", "Content-Type", "Authorization"],

@@ -14,6 +14,14 @@ const transporter = nodemailer.createTransport({
   },
 });
 
+// Base URL of the React frontend, used to build the reset link that is
+// emailed to the user. Configure it per environment:
+//   FRONTEND_URL=https://<your-frontend-domain>
+// Falls back to local development only.
+const FRONTEND_BASE_URL = (
+  process.env.FRONTEND_URL || "http://localhost:5173"
+).replace(/\/$/, "");
+
 // Step 1: Request to reset password (send verification code)
 router.post("/forgot-password", async (req, res) => {
   // console.log("Request received for reset password");
@@ -36,7 +44,7 @@ router.post("/forgot-password", async (req, res) => {
     await user.save();
 
     // Send email with the reset token
-    const resetUrl = `http://localhost:5000/reset-password/${resetToken}`;
+    const resetUrl = `${FRONTEND_BASE_URL}/reset-password/${resetToken}`;
     const mailOptions = {
       to: email,
       from: process.env.EMAIL_USER,
