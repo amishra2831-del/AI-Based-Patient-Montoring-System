@@ -55,17 +55,15 @@ app = FastAPI(
 # https://health-frontend-xxxx.vercel.app
 # ============================================================
 
-frontend_url = os.getenv(
-    "FRONTEND_URL",
-    "https://health-frontend-rho.vercel.app",
-).strip().rstrip("/")
+frontend_url = os.getenv("FRONTEND_URL", "").strip().rstrip("/")
 
 ALLOWED_ORIGINS = {
-    frontend_url,
-    "https://health-frontend-rho.vercel.app",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
 }
+
+if frontend_url:
+    ALLOWED_ORIGINS.add(frontend_url)
 
 ALLOWED_ORIGINS.discard("")
 

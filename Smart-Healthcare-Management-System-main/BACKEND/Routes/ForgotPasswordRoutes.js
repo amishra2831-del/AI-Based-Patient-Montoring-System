@@ -36,7 +36,8 @@ router.post("/forgot-password", async (req, res) => {
     await user.save();
 
     // Send email with the reset token
-    const resetUrl = `http://localhost:5000/reset-password/${resetToken}`;
+    const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173";
+    const resetUrl = `${frontendUrl}/reset-password/${resetToken}`;
     const mailOptions = {
       to: email,
       from: process.env.EMAIL_USER,

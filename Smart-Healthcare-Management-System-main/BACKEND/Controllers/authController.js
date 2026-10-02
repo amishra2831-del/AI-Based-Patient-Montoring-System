@@ -36,7 +36,7 @@ const registerUser = async (req, res) => {
     // Generate JWT Token
     const token = jwt.sign(
       { id: newUser._id, email: newUser.email },
-      process.env.JWT_SECRET,
+      process.env.JWT_SECRET || "fallback_dev_secret_change_in_production",
       { expiresIn: "1h" }
     );
 
@@ -69,7 +69,7 @@ const loginUser = async (req, res) => {
 
     const token = jwt.sign(
       { id: user._id, email: user.email },
-      process.env.JWT_SECRET,
+      process.env.JWT_SECRET || "fallback_dev_secret_change_in_production",
       { expiresIn: "1h" }
     );
 
@@ -116,7 +116,7 @@ const registerDoctor = async (req, res) => {
     // Generate JWT Token
     const token = jwt.sign(
       { id: newDoctor._id, email: newDoctor.email, role: "doctor" },
-      process.env.JWT_SECRET,
+      process.env.JWT_SECRET || "fallback_dev_secret_change_in_production",
       { expiresIn: "1h" }
     );
 
@@ -151,7 +151,7 @@ const loginDoctor = async (req, res) => {
 
     const token = jwt.sign(
       { id: doctor._id, email: doctor.email, role: "doctor" },
-      process.env.JWT_SECRET,
+      process.env.JWT_SECRET || "fallback_dev_secret_change_in_production",
       { expiresIn: "1h" }
     );
 

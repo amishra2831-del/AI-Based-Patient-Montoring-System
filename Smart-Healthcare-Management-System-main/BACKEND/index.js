@@ -351,38 +351,38 @@ app.use((err, req, res, next) => {
 // MONGODB CONNECTION
 // ============================================================
 
-const mongoURI =
-  process.env.MONGO_URI ||
-  "mongodb://127.0.0.1:27017/mediflow";
+const mongoURI = process.env.MONGO_URI || "";
 
-mongoose
-  .connect(mongoURI)
-  .then(() => {
-    console.log("========================================");
-    console.log("Connected to MongoDB");
-    console.log("========================================");
+if (mongoURI) {
+  mongoose
+    .connect(mongoURI)
+    .then(() => {
+      console.log("========================================");
+      console.log("Connected to MongoDB");
+      console.log("========================================");
 
-    // --------------------------------------------------------
-    // LOCAL DEVELOPMENT
-    // --------------------------------------------------------
+      if (process.env.NODE_ENV !== "production") {
+        const PORT = Number(process.env.PORT) || 5000;
+        app.listen(PORT, () => {
+          console.log(`Server running on port ${PORT}`);
+        });
+      }
+    })
+    .catch((err) => {
+      console.error("Database connection error:", err.message);
+    });
+} else {
+  console.log("========================================");
+  console.log("MONGO_URI not set - running without database");
+  console.log("========================================");
 
-    if (process.env.NODE_ENV !== "production") {
-      const PORT =
-        Number(process.env.PORT) || 5000;
-
-      app.listen(PORT, () => {
-        console.log(
-          `Server running on port ${PORT}`
-        );
-      });
-    }
-  })
-  .catch((err) => {
-    console.error(
-      "Database connection error:",
-      err.message
-    );
-  });
+  if (process.env.NODE_ENV !== "production") {
+    const PORT = Number(process.env.PORT) || 5000;
+    app.listen(PORT, () => {
+      console.log(`Server running on port ${PORT} (no DB)`);
+    });
+  }
+}
 
 // ============================================================
 // EXPORT APP

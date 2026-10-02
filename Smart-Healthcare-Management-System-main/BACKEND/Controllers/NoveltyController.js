@@ -1,5 +1,5 @@
 const AI_API_URL =
-  process.env.AI_API_URL || "https://health-ai-rust-two.vercel.app";
+  process.env.AI_API_URL || "http://localhost:8000";
 
 exports.analyzeSymptoms = async (req, res) => {
   try {
