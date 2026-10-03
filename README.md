@@ -1,1 +1,1 @@
-live link : https://aipatientmonitoringsystem.vercel.app/
+live link : https://health-frontend-rho.vercel.app/
